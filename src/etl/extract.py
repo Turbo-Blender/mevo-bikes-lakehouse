@@ -4,6 +4,8 @@ import os
 import requests
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 
 MINIO_PASSWORD = os.getenv("MINIO_ROOT_PASSWORD", "minio1234")
@@ -30,8 +32,25 @@ FEEDS = {
 STATIC_FEEDS = {"vehicle_types", "system_pricing_plans", "station_information"}
 
 
+def create_http_session():
+    # Retries immediately, then waits 2s, 4s, 8s, 16s; honours Retry-After on 429/503.
+    retry = Retry(
+        total=5,
+        backoff_factor=1,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["GET"],
+        respect_retry_after_header=True,
+    )
+    session = requests.Session()
+    session.mount("https://", HTTPAdapter(max_retries=retry))
+    return session
+
+
+http = create_http_session()
+
+
 def fetch_feed(feed_name):
-    response = requests.get(
+    response = http.get(
         f"{GBFS_BASE_URL}/{feed_name}.json",
         headers=headers,
         timeout=30,

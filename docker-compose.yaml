@@ -1,4 +1,4 @@
-# Lakehouse stack (spark, minio, warehouse postgres)
+# Lakehouse stack (spark, minio, warehouse clickhouse)
 # + official Apache Airflow 3 docker-compose (CeleryExecutor)
 ---
 x-airflow-common:
@@ -22,7 +22,6 @@ x-airflow-common:
     AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW__API_AUTH__JWT_SECRET:-airflow_jwt_secret}
     AIRFLOW__API_AUTH__JWT_ISSUER: ${AIRFLOW__API_AUTH__JWT_ISSUER:-airflow}
     AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
-    AIRFLOW_CONN_POSTGRES_DEFAULT: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-warehouse}
     _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-}
     AIRFLOW_CONFIG: '/opt/airflow/config/airflow.cfg'
   volumes:
@@ -50,10 +49,11 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
       MINIO_ENDPOINT_S3: ${MINIO_ENDPOINT_S3}
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: ${POSTGRES_DB:-warehouse}
-      POSTGRES_HOST: postgres
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB:-warehouse}
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: 8123
     volumes:
       - ./src:/app/src
       - ./data:/app/data
@@ -75,23 +75,29 @@ services:
       - minio_data:/data
     command: server /data --console-address ":9001"
 
-  # Warehouse DB used by Spark ETL + DAG SQL tasks
-  postgres:
-    image: postgres:16
-    container_name: lakehouse-postgres
+  # Data warehouse (serving layer for the gold tables)
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    container_name: mevo-clickhouse
     environment:
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: ${POSTGRES_DB:-warehouse}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB:-warehouse}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
     ports:
-      - "5432:5432"
+      - "8123:8123"   # HTTP interface
+      - "9002:9000"   # native protocol (9000 is taken by MinIO)
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - clickhouse_data:/var/lib/clickhouse
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1"]
       interval: 10s
       retries: 5
-      start_period: 5s
+      start_period: 10s
     restart: always
 
   # Airflow metadata DB (separate from warehouse)
@@ -347,5 +353,5 @@ services:
 
 volumes:
   minio_data:
-  postgres_data:
+  clickhouse_data:
   airflow_postgres_data:

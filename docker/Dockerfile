@@ -25,11 +25,6 @@ RUN curl -L \
     -o /opt/spark/jars/delta-storage-3.3.2.jar \
     https://repo1.maven.org/maven2/io/delta/delta-storage/3.3.2/delta-storage-3.3.2.jar
 
-# PostgreSQL JDBC
-RUN curl -L \
-    -o /opt/spark/jars/postgresql-42.7.3.jar \
-    https://repo1.maven.org/maven2/org/postgresql/postgresql/42.7.3/postgresql-42.7.3.jar
-
 WORKDIR /opt/spark-apps
 
 USER spark

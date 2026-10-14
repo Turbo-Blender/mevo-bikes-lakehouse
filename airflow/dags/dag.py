@@ -1,13 +1,12 @@
 from datetime import datetime, timedelta
 
 from airflow import DAG
-from airflow.providers.common.sql.operators.sql import SQLExecuteQueryOperator
-from airflow.providers.common.sql.sensors.sql import SqlSensor
 from airflow.providers.standard.operators.bash import BashOperator
 
-SPARK_CONTAINER = "nyc-taxi-spark"
-SQL_DIR = "/opt/airflow/src/SQL"
-POSTGRES_CONN_ID = "postgres_default"
+SPARK_CONTAINER = "mevo-bikes-spark"
+MINIO_CONTAINER = "minio"
+SPARK_SUBMIT = "/opt/spark/bin/spark-submit"
+BUCKET = "lakehouse"
 
 default_args = {
     "owner": "TurboBlender",
@@ -15,175 +14,53 @@ default_args = {
     "retry_delay": timedelta(minutes=2),
 }
 
+
+def spark_job(script):
+    return f"docker exec {SPARK_CONTAINER} {SPARK_SUBMIT} /app/src/etl/{script}"
+
+
 with DAG(
-    dag_id="nyc_taxi_lakehouse",
+    dag_id="mevo_lakehouse",
     default_args=default_args,
     start_date=datetime(2026, 1, 1),
     schedule="*/30 * * * *",
     catchup=False,
-    template_searchpath=[SQL_DIR],
-    tags=["nyc-taxi", "lakehouse"],
+    # Runs share the same Delta tables, so they must not overlap.
+    max_active_runs=1,
+    tags=["mevo", "lakehouse", "clickhouse"],
 ) as dag:
 
-    wait_for_postgres = SqlSensor(
-        task_id="wait_for_postgres",
-        conn_id=POSTGRES_CONN_ID,
-        sql="SELECT 1;",
-        poke_interval=30,
-        timeout=600,
-        mode="reschedule",
-    )
-
-    prepare_taxi_zones_table = SQLExecuteQueryOperator(
-        task_id="prepare_taxi_zones_table",
-        conn_id=POSTGRES_CONN_ID,
-        sql="reference/01_create_taxi_zones.sql",
-        split_statements=True,
-    )
-
-    load_taxi_zones = BashOperator(
-        task_id="load_taxi_zones",
+    ensure_bucket = BashOperator(
+        task_id="ensure_bucket",
         bash_command=(
-            f"docker exec {SPARK_CONTAINER} "
-            "python3 /app/src/etl/load_taxi_zones.py"
+            f"docker exec {MINIO_CONTAINER} sh -c "
+            "'mc alias set local http://localhost:9000 \"$MINIO_ROOT_USER\" \"$MINIO_ROOT_PASSWORD\" "
+            f"&& mc mb --ignore-existing local/{BUCKET}'"
         ),
     )
 
-    create_raw_schema = SQLExecuteQueryOperator(
-        task_id="create_raw_schema",
-        conn_id=POSTGRES_CONN_ID,
-        sql="CREATE SCHEMA IF NOT EXISTS raw;",
+    # API -> bronze (Delta in MinIO)
+    extract = BashOperator(
+        task_id="extract_bronze",
+        bash_command=spark_job("extract.py"),
     )
 
-    spark_extract = BashOperator(
-        task_id="spark_extract",
-        bash_command=(
-            f"docker exec {SPARK_CONTAINER} "
-            "python3 /app/src/etl/extract.py"
-        ),
+    # bronze -> silver
+    transform = BashOperator(
+        task_id="transform_silver",
+        bash_command=spark_job("transform.py"),
     )
 
-    spark_transform = BashOperator(
-        task_id="spark_transform",
-        bash_command=(
-            f"docker exec {SPARK_CONTAINER} "
-            "python3 /app/src/etl/transform.py"
-        ),
+    # silver -> gold (star schema + aggregates, Delta in MinIO)
+    gold = BashOperator(
+        task_id="build_gold",
+        bash_command=spark_job("gold.py"),
     )
 
-    spark_load = BashOperator(
-        task_id="spark_load",
-        bash_command=(
-            f"docker exec {SPARK_CONTAINER} "
-            "python3 /app/src/etl/load.py"
-        ),
+    # gold -> ClickHouse (data warehouse)
+    load = BashOperator(
+        task_id="load_clickhouse",
+        bash_command=spark_job("load.py"),
     )
 
-    silver_rename = SQLExecuteQueryOperator(
-        task_id="silver_01_rename_columns",
-        conn_id=POSTGRES_CONN_ID,
-        sql="silver/01_rename_columns.sql",
-        split_statements=True,
-    )
-
-    silver_clean = SQLExecuteQueryOperator(
-        task_id="silver_02_clean_records",
-        conn_id=POSTGRES_CONN_ID,
-        sql="silver/02_clean_records.sql",
-        split_statements=True,
-    )
-
-    silver_dedup = SQLExecuteQueryOperator(
-        task_id="silver_03_deduplicate",
-        conn_id=POSTGRES_CONN_ID,
-        sql="silver/03_deduplicate.sql",
-        split_statements=True,
-    )
-
-    silver_derived = SQLExecuteQueryOperator(
-        task_id="silver_04_derived_columns",
-        conn_id=POSTGRES_CONN_ID,
-        sql="silver/04_derived_columns.sql",
-        split_statements=True,
-    )
-
-    gold_schema_create = SQLExecuteQueryOperator(
-        task_id="gold_00_create_schema",
-        conn_id=POSTGRES_CONN_ID,
-        sql="gold/00_create_gold_schema.sql",
-        split_statements=True,
-    )
-    
-    gold_dim_date = SQLExecuteQueryOperator(
-        task_id="gold_01_dim_date",
-        conn_id=POSTGRES_CONN_ID,
-        sql="gold/dimensions/01_dim_date.sql",
-        split_statements=True,
-    )
-
-    gold_dim_taxi_zone = SQLExecuteQueryOperator(
-        task_id="gold_02_dim_taxi_zone",
-        conn_id=POSTGRES_CONN_ID,
-        sql="gold/dimensions/02_dim_taxi_zone.sql",
-        split_statements=True,
-    )
-
-    gold_dim_vendor = SQLExecuteQueryOperator(
-        task_id="gold_03_dim_vendor",
-        conn_id=POSTGRES_CONN_ID,
-        sql="gold/dimensions/03_dim_vendor.sql",
-        split_statements=True,
-    )
-
-    gold_dim_payment_type = SQLExecuteQueryOperator(
-        task_id="gold_04_dim_payment_type",
-        conn_id=POSTGRES_CONN_ID,
-        sql="gold/dimensions/04_dim_payment_type.sql",
-        split_statements=True,
-    )
-
-    gold_dim_rate_code = SQLExecuteQueryOperator(
-        task_id="gold_05_dim_rate_code",
-        conn_id=POSTGRES_CONN_ID,
-        sql="gold/dimensions/05_dim_rate_code.sql",
-        split_statements=True,
-    )
-
-    gold_fact_yellow_trips = SQLExecuteQueryOperator(
-        task_id="gold_06_fact_yellow_trips",
-        conn_id=POSTGRES_CONN_ID,
-        sql="gold/facts/06_fact_yellow_trips.sql",
-        split_statements=True,
-    )
-    
-    gold_zone_hourly_demand = SQLExecuteQueryOperator(
-        task_id="gold_07_zone_hourly_demand",
-        conn_id=POSTGRES_CONN_ID,
-        sql="gold/aggregates/07_zone_hourly_demand.sql",
-        split_statements=True,
-    )
-
-    gold_daily_kpis = SQLExecuteQueryOperator(
-        task_id="gold_08_daily_kpis",
-        conn_id=POSTGRES_CONN_ID,
-        sql="gold/aggregates/08_daily_kpis.sql",
-        split_statements=True,
-    )
-
-    (
-        wait_for_postgres
-        >> prepare_taxi_zones_table
-        >> load_taxi_zones
-        >> create_raw_schema
-        >> spark_extract
-        >> spark_transform
-        >> spark_load
-        >> silver_rename
-        >> silver_clean
-        >> silver_dedup
-        >> silver_derived
-        >> gold_schema_create
-        >> [gold_dim_date, gold_dim_taxi_zone, gold_dim_vendor, gold_dim_payment_type, gold_dim_rate_code]
-        >> gold_fact_yellow_trips
-        >> [gold_zone_hourly_demand, gold_daily_kpis]
-    )
+    ensure_bucket >> extract >> transform >> gold >> load

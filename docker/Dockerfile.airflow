@@ -11,7 +11,5 @@ USER airflow
 
 RUN pip install --no-cache-dir \
     apache-airflow-providers-fab \
-    apache-airflow-providers-common-sql \
-    apache-airflow-providers-postgres \
     apache-airflow-providers-standard \
     apache-airflow-providers-celery
