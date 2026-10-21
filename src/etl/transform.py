@@ -4,22 +4,22 @@ from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.utils import AnalysisException
 
-from lineage import with_lineage
+from common.lineage import with_lineage
 
 
 MINIO_PASSWORD = os.getenv("MINIO_ROOT_PASSWORD", "minio1234")
 MINIO_USER = os.getenv("MINIO_ROOT_USER", "minio12345")
 MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT_S3", "http://minio:9000")
 
-BRONZE_PATH = "s3a://lakehouse/bronze/mevo"
-SILVER_PATH = "s3a://lakehouse/silver/mevo"
+BRONZE_PATH = os.getenv("BRONZE_PATH", "s3a://lakehouse/bronze/mevo")
+SILVER_PATH = os.getenv("SILVER_PATH", "s3a://lakehouse/silver/mevo")
 
 # Rough bounding box of the Mevo service area (Tricity and surrounding municipalities).
 SERVICE_AREA = {
-    "lat_min": 53.9,
-    "lat_max": 54.9,
-    "lon_min": 17.8,
-    "lon_max": 19.2,
+    "lat_min": float(os.getenv("SERVICE_AREA_LAT_MIN", "53.9")),
+    "lat_max": float(os.getenv("SERVICE_AREA_LAT_MAX", "54.9")),
+    "lon_min": float(os.getenv("SERVICE_AREA_LON_MIN", "17.8")),
+    "lon_max": float(os.getenv("SERVICE_AREA_LON_MAX", "19.2")),
 }
 
 
@@ -129,7 +129,7 @@ SILVER_STATION_COLUMNS = [
 
 # The first load has no earlier snapshots, so its versions are valid "from the beginning"
 # and every historical station_status snapshot can be joined to a station version.
-SCD2_INITIAL_VALID_FROM = "2000-01-01 00:00:00"
+SCD2_INITIAL_VALID_FROM = os.getenv("SCD2_INITIAL_VALID_FROM", "2000-01-01 00:00:00")
 
 
 def transform_station_information(df):

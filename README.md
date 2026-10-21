@@ -94,6 +94,16 @@ Rekordy z API zapisane bez zmian, z dodaną kolumną `last_updated` (czas wygene
 - `station_status`, `free_bike_status` - snapshoty, tryb `append`, partycje `year/month`. Zostaje wszystko, co zwróciło API, a deduplikacja należy do Silvera.
 - `vehicle_types`, `system_pricing_plans`, `station_information` - rzadko się zmieniają, więc tryb `overwrite` bez partycji (poprzednie wersje dostępne przez time travel).
 
+**Kontrola jakości na wejściu** (`src/etl/quality.py`):
+
+- odpowiedź API musi mieć poprawną strukturę GBFS (`last_updated`, lista rekordów w `data`), inaczej zadanie kończy się błędem,
+- feed musi zawierać wymagane kolumny (np. `station_id`, `lat`, `lon`, `last_reported`),
+- każdy rekord jest sprawdzany regułami (klucze nie-NULL, poprawne współrzędne, nieujemna cena i pojemność); rekordy łamiące reguły trafiają do `s3a://lakehouse/quarantine/mevo/<feed>` z listą złamanych reguł w `failed_rules`,
+- jeśli odrzuconych jest więcej niż `BRONZE_MAX_REJECTED_RATIO` (domyślnie 10%), feed uznawany jest za uszkodzony i Bronze nie jest aktualizowany,
+- te same reguły są założone na tabelach Bronze jako Delta `CHECK` constraints, więc zapis z pominięciem walidacji też zostanie odrzucony.
+
+Ujemne liczniki w `station_status` nie są odrzucane - Silver je zachowuje i oznacza flagą `has_negative_counts`.
+
 ### Silver - `s3a://lakehouse/silver/mevo/`
 
 Oczyszczone, otypowane i znormalizowane dane.
@@ -112,6 +122,303 @@ Zdenormalizowana star schema i agregaty, budowane zapytaniami Spark SQL z `src/S
 ### ClickHouse - baza `warehouse`
 
 Kopia tabel Gold w silniku `MergeTree`, z partycjami miesięcznymi dla faktu i agregatu. Tabele tworzy `src/SQL/clickhouse/00_create_tables.sql`, a `load.py` przed każdym ładowaniem robi `TRUNCATE`.
+
+### Schematy tabel
+
+Poniżej znajduje się pełny słownik kolumn dla tabel `bronze`, `silver` i `gold`. Typy podano w konwencji Spark SQL / Delta Lake.
+
+#### Bronze
+
+<details>
+<summary><code>vehicle_types</code></summary>
+
+| Kolumna | Typ | Opis |
+| --- | --- | --- |
+| `vehicle_type_id` | `string` | Id typu roweru, np. `bike` lub `ebike` |
+| `form_factor` | `string` | Forma pojazdu wg GBFS |
+| `default_pricing_plan_id` | `string` | Domyślny plan cenowy powiązany z typem roweru |
+| `propulsion_type` | `string` | Typ napędu, np. `human` lub `electric_assist` |
+| `name` | `string` | Nazwa typu roweru |
+| `rider_capacity` | `bigint` | Liczba miejsc |
+| `max_range_meters` | `bigint` | Maksymalny zasięg w metrach |
+| `last_updated` | `timestamp` | Czas snapshotu zwrócony przez API |
+
+</details>
+
+<details>
+<summary><code>system_pricing_plans</code></summary>
+
+| Kolumna | Typ | Opis |
+| --- | --- | --- |
+| `plan_id` | `string` | Id planu cenowego |
+| `name` | `string` | Nazwa planu |
+| `currency` | `string` | Waluta, np. `PLN` |
+| `price` | `bigint` | Cena planu |
+| `description` | `string` | Opis planu |
+| `is_taxable` | `boolean` | Flaga opodatkowania |
+| `per_min_pricing` | `array<struct<start:bigint,rate:double,end:bigint,interval:bigint>>` | Progi rozliczeń minutowych |
+| `last_updated` | `timestamp` | Czas snapshotu zwrócony przez API |
+
+</details>
+
+<details>
+<summary><code>station_information</code></summary>
+
+| Kolumna | Typ | Opis |
+| --- | --- | --- |
+| `station_id` | `string` | Id stacji w systemie źródłowym |
+| `name` | `string` | Nazwa stacji |
+| `address` | `string` | Adres stacji |
+| `cross_street` | `string` | Dodatkowy opis lokalizacji |
+| `lat` | `double` | Szerokość geograficzna |
+| `lon` | `double` | Długość geograficzna |
+| `is_virtual_station` | `boolean` | Czy stacja jest wirtualna |
+| `capacity` | `bigint` | Liczba miejsc dokujących |
+| `station_area` | `struct<type:string,coordinates:array<array<array<array<double>>>>>` | Geometria obszaru stacji |
+| `rental_uris` | `struct<android:string,ios:string>` | Linki deep-link do aplikacji |
+| `last_updated` | `timestamp` | Czas snapshotu zwrócony przez API |
+
+</details>
+
+<details>
+<summary><code>station_status</code></summary>
+
+| Kolumna | Typ | Opis |
+| --- | --- | --- |
+| `station_id` | `string` | Id stacji |
+| `is_installed` | `boolean` | Czy stacja jest zainstalowana |
+| `is_renting` | `boolean` | Czy można wypożyczać rowery |
+| `is_returning` | `boolean` | Czy można zwracać rowery |
+| `last_reported` | `bigint` | Czas raportu stacji w epoce Unix |
+| `num_vehicles_available` | `bigint` | Liczba dostępnych pojazdów |
+| `num_bikes_available` | `bigint` | Liczba dostępnych rowerów |
+| `num_docks_available` | `bigint` | Liczba wolnych miejsc |
+| `vehicle_types_available` | `array<struct<vehicle_type_id:string,count:bigint>>` | Dostępność wg typu roweru |
+| `last_updated` | `timestamp` | Czas snapshotu zwrócony przez API |
+| `year` | `int` | Rok partycji wyliczony z `last_updated` |
+| `month` | `int` | Miesiąc partycji wyliczony z `last_updated` |
+
+</details>
+
+<details>
+<summary><code>free_bike_status</code></summary>
+
+| Kolumna | Typ | Opis |
+| --- | --- | --- |
+| `bike_id` | `string` | Id roweru poza stacją |
+| `lat` | `double` | Szerokość geograficzna |
+| `lon` | `double` | Długość geograficzna |
+| `is_reserved` | `boolean` | Czy rower jest zarezerwowany |
+| `is_disabled` | `boolean` | Czy rower jest wyłączony z użycia |
+| `rental_uris` | `struct<android:string,ios:string>` | Linki deep-link do aplikacji |
+| `vehicle_type_id` | `string` | Typ roweru |
+| `last_reported` | `bigint` | Czas raportu roweru w epoce Unix |
+| `current_range_meters` | `bigint` | Aktualny zasięg roweru w metrach |
+| `last_updated` | `timestamp` | Czas snapshotu zwrócony przez API |
+| `year` | `int` | Rok partycji wyliczony z `last_updated` |
+| `month` | `int` | Miesiąc partycji wyliczony z `last_updated` |
+
+</details>
+
+#### Silver
+
+<details>
+<summary><code>vehicle_types</code></summary>
+
+| Kolumna | Typ | Opis |
+| --- | --- | --- |
+| `vehicle_type_id` | `string` | Id typu roweru |
+| `form_factor` | `string` | Forma pojazdu wg GBFS |
+| `default_pricing_plan_id` | `string` | Domyślny plan cenowy |
+| `propulsion_type` | `string` | Typ napędu |
+| `name` | `string` | Nazwa typu roweru |
+| `rider_capacity` | `bigint` | Liczba miejsc |
+| `max_range_meters` | `bigint` | Maksymalny zasięg w metrach |
+| `last_updated` | `timestamp` | Czas snapshotu źródłowego |
+
+</details>
+
+<details>
+<summary><code>system_pricing_plans</code></summary>
+
+| Kolumna | Typ | Opis |
+| --- | --- | --- |
+| `plan_id` | `string` | Id planu cenowego |
+| `name` | `string` | Nazwa planu |
+| `currency` | `string` | Waluta |
+| `price` | `bigint` | Cena planu |
+| `description` | `string` | Opis planu |
+| `is_taxable` | `boolean` | Flaga opodatkowania |
+| `per_min_pricing` | `array<struct<start:bigint,rate:double,end:bigint,interval:bigint>>` | Progi rozliczeń minutowych |
+| `last_updated` | `timestamp` | Czas snapshotu źródłowego |
+
+</details>
+
+<details>
+<summary><code>station_information</code></summary>
+
+| Kolumna | Typ | Opis |
+| --- | --- | --- |
+| `station_key` | `bigint` | Klucz zastępczy wersji stacji |
+| `station_id` | `string` | Id stacji w systemie źródłowym |
+| `name` | `string` | Nazwa stacji |
+| `address` | `string` | Adres stacji |
+| `cross_street` | `string` | Dodatkowy opis lokalizacji |
+| `lat` | `double` | Szerokość geograficzna |
+| `lon` | `double` | Długość geograficzna |
+| `capacity` | `bigint` | Liczba miejsc dokujących |
+| `is_virtual_station` | `boolean` | Czy stacja jest wirtualna |
+| `station_area` | `struct<type:string,coordinates:array<array<array<array<double>>>>>` | Geometria obszaru stacji |
+| `attr_hash` | `string` | Hash atrybutów śledzonych przez SCD2 |
+| `valid_from` | `timestamp` | Początek obowiązywania wersji |
+| `valid_to` | `timestamp` | Koniec obowiązywania wersji |
+| `is_current` | `boolean` | Czy to aktualna wersja stacji |
+
+</details>
+
+<details>
+<summary><code>station_status</code></summary>
+
+| Kolumna | Typ | Opis |
+| --- | --- | --- |
+| `station_id` | `string` | Id stacji |
+| `is_installed` | `boolean` | Czy stacja jest zainstalowana |
+| `is_renting` | `boolean` | Czy można wypożyczać rowery |
+| `is_returning` | `boolean` | Czy można zwracać rowery |
+| `last_reported` | `timestamp` | Czas raportu stacji |
+| `num_vehicles_available` | `bigint` | Liczba dostępnych pojazdów |
+| `num_bikes_available` | `bigint` | Liczba dostępnych rowerów |
+| `num_docks_available` | `bigint` | Liczba wolnych miejsc |
+| `last_updated` | `timestamp` | Czas snapshotu API |
+| `bikes_available` | `bigint` | Liczba zwykłych rowerów |
+| `ebikes_available` | `bigint` | Liczba e-rowerów |
+| `has_negative_counts` | `boolean` | Flaga jakości dla ujemnych liczników |
+| `year` | `int` | Rok partycji wyliczony z `last_updated` |
+| `month` | `int` | Miesiąc partycji wyliczony z `last_updated` |
+
+</details>
+
+<details>
+<summary><code>free_bike_status</code></summary>
+
+| Kolumna | Typ | Opis |
+| --- | --- | --- |
+| `bike_id` | `string` | Id roweru poza stacją |
+| `lat` | `double` | Szerokość geograficzna |
+| `lon` | `double` | Długość geograficzna |
+| `is_reserved` | `boolean` | Czy rower jest zarezerwowany |
+| `is_disabled` | `boolean` | Czy rower jest wyłączony z użycia |
+| `vehicle_type_id` | `string` | Typ roweru |
+| `last_reported` | `timestamp` | Czas raportu roweru |
+| `current_range_meters` | `bigint` | Aktualny zasięg roweru w metrach |
+| `last_updated` | `timestamp` | Czas snapshotu API |
+| `has_invalid_coordinates` | `boolean` | Flaga jakości dla współrzędnych poza obszarem usługi |
+| `year` | `int` | Rok partycji wyliczony z `last_reported` |
+| `month` | `int` | Miesiąc partycji wyliczony z `last_reported` |
+
+</details>
+
+#### Gold
+
+<details>
+<summary><code>dim_station</code></summary>
+
+| Kolumna | Typ | Opis |
+| --- | --- | --- |
+| `station_key` | `bigint` | Klucz zastępczy wersji stacji |
+| `station_id` | `string` | Id stacji |
+| `station_name` | `string` | Nazwa stacji |
+| `address` | `string` | Adres stacji |
+| `cross_street` | `string` | Dodatkowy opis lokalizacji |
+| `lat` | `double` | Szerokość geograficzna |
+| `lon` | `double` | Długość geograficzna |
+| `capacity` | `bigint` | Liczba miejsc dokujących |
+| `is_virtual_station` | `boolean` | Czy stacja jest wirtualna |
+| `valid_from` | `timestamp` | Początek obowiązywania wersji |
+| `valid_to` | `timestamp` | Koniec obowiązywania wersji |
+| `is_current` | `boolean` | Czy to aktualna wersja stacji |
+
+</details>
+
+<details>
+<summary><code>dim_vehicle_type</code></summary>
+
+| Kolumna | Typ | Opis |
+| --- | --- | --- |
+| `vehicle_type_id` | `string` | Id typu roweru |
+| `vehicle_type_name` | `string` | Nazwa typu roweru |
+| `form_factor` | `string` | Forma pojazdu wg GBFS |
+| `propulsion_type` | `string` | Typ napędu |
+| `rider_capacity` | `bigint` | Liczba miejsc |
+| `max_range_meters` | `bigint` | Maksymalny zasięg w metrach |
+| `pricing_plan_id` | `string` | Id planu cenowego |
+| `pricing_plan_name` | `string` | Nazwa planu cenowego |
+| `price` | `bigint` | Cena planu |
+| `currency` | `string` | Waluta |
+
+</details>
+
+<details>
+<summary><code>dim_date</code></summary>
+
+| Kolumna | Typ | Opis |
+| --- | --- | --- |
+| `date_key` | `int` | Klucz daty w formacie `yyyyMMdd` |
+| `full_date` | `date` | Pełna data |
+| `year` | `int` | Rok |
+| `quarter` | `int` | Kwartał |
+| `month` | `int` | Miesiąc |
+| `month_name` | `string` | Nazwa miesiąca |
+| `day` | `int` | Dzień miesiąca |
+| `day_of_week` | `int` | Dzień tygodnia od 1 do 7 |
+| `day_name` | `string` | Nazwa dnia tygodnia |
+| `is_weekend` | `boolean` | Czy dzień jest weekendem |
+
+</details>
+
+<details>
+<summary><code>fact_station_status</code></summary>
+
+| Kolumna | Typ | Opis |
+| --- | --- | --- |
+| `station_key` | `bigint` | Klucz wersji stacji aktywnej w chwili snapshotu |
+| `station_id` | `string` | Id stacji |
+| `date_key` | `int` | Klucz daty lokalnej (`Europe/Warsaw`) |
+| `hour` | `int` | Godzina lokalna snapshotu |
+| `snapshot_at` | `timestamp` | Czas snapshotu w strefie `Europe/Warsaw` |
+| `snapshot_at_utc` | `timestamp` | Czas snapshotu w UTC |
+| `num_bikes_available` | `bigint` | Liczba rowerów dostępnych ogółem |
+| `bikes_available` | `bigint` | Liczba zwykłych rowerów |
+| `ebikes_available` | `bigint` | Liczba e-rowerów |
+| `num_docks_available` | `bigint` | Liczba wolnych miejsc |
+| `occupancy_ratio` | `double` | Udział zajętych miejsc względem `capacity` |
+| `is_empty` | `boolean` | Czy stacja jest pusta |
+| `is_full` | `boolean` | Czy stacja jest pełna |
+| `is_installed` | `boolean` | Czy stacja jest zainstalowana |
+| `is_renting` | `boolean` | Czy można wypożyczać rowery |
+| `is_returning` | `boolean` | Czy można zwracać rowery |
+
+</details>
+
+<details>
+<summary><code>station_hourly_occupancy</code></summary>
+
+| Kolumna | Typ | Opis |
+| --- | --- | --- |
+| `station_id` | `string` | Id stacji |
+| `date_key` | `int` | Klucz daty lokalnej (`Europe/Warsaw`) |
+| `hour` | `int` | Godzina lokalna |
+| `snapshot_count` | `bigint` | Liczba snapshotów w danej godzinie |
+| `avg_bikes_available` | `double` | Średnia liczba rowerów |
+| `min_bikes_available` | `bigint` | Minimalna liczba rowerów |
+| `max_bikes_available` | `bigint` | Maksymalna liczba rowerów |
+| `avg_ebikes_available` | `double` | Średnia liczba e-rowerów |
+| `avg_docks_available` | `double` | Średnia liczba wolnych miejsc |
+| `avg_occupancy_ratio` | `double` | Średnie obłożenie stacji |
+| `empty_ratio` | `double` | Udział snapshotów, w których stacja była pusta |
+| `full_ratio` | `double` | Udział snapshotów, w których stacja była pełna |
+
+</details>
 
 ## Model danych
 
@@ -191,8 +498,10 @@ mevo-bikes-lakehouse/
 │   │   ├── extract.py           # API -> Bronze
 │   │   ├── transform.py         # Bronze -> Silver
 │   │   ├── gold.py              # Silver -> Gold
-│   │   ├── load.py              # Gold -> ClickHouse
-│   │   └── lineage.py           # wspólne funkcje OpenLineage
+│   │   └── load.py              # Gold -> ClickHouse
+│   ├── common/
+│   │   ├── lineage.py           # wspólne funkcje OpenLineage
+│   │   └── quality.py           # reguły jakości i constrainty Bronze
 │   └── SQL/
 │       ├── gold/
 │       │   ├── dimensions/      # dim_station, dim_vehicle_type, dim_date

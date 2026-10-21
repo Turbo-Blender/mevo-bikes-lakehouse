@@ -1,10 +1,11 @@
 from datetime import datetime, timedelta
+import os
 
 from airflow import DAG
 from airflow.providers.standard.operators.bash import BashOperator
 
-SPARK_CONTAINER = "mevo-bikes-spark"
-SPARK_SUBMIT = "/opt/spark/bin/spark-submit"
+SPARK_CONTAINER = os.getenv("SPARK_CONTAINER", "mevo-bikes-spark")
+SPARK_SUBMIT = os.getenv("SPARK_SUBMIT", "/opt/spark/bin/spark-submit")
 
 default_args = {
     "owner": "TurboBlender",

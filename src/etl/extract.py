@@ -7,15 +7,19 @@ from pyspark.sql import functions as F
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from lineage import api_dataset, bronze_dataset, emit_run_event, with_lineage
+from common.lineage import api_dataset, bronze_dataset, emit_run_event, with_lineage
+from common.quality import ensure_constraints, split_by_rules, validate_payload
 
 
 MINIO_PASSWORD = os.getenv("MINIO_ROOT_PASSWORD", "minio1234")
 MINIO_USER = os.getenv("MINIO_ROOT_USER", "minio12345")
 MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT_S3", "http://minio:9000")
 
-GBFS_BASE_URL = "https://gbfs.urbansharing.com/rowermevo.pl"
-BRONZE_PATH = "s3a://lakehouse/bronze/mevo"
+GBFS_BASE_URL = os.getenv("GBFS_BASE_URL", "https://gbfs.urbansharing.com/rowermevo.pl")
+BRONZE_PATH = os.getenv("BRONZE_PATH", "s3a://lakehouse/bronze/mevo")
+QUARANTINE_PATH = os.getenv("QUARANTINE_PATH", "s3a://lakehouse/quarantine/mevo")
+# Above this share of rejected records the feed is treated as broken and nothing is written to bronze.
+MAX_REJECTED_RATIO = float(os.getenv("BRONZE_MAX_REJECTED_RATIO", "0.1"))
 
 headers = {
     "Client-Identifier": "mevo-bikes-lakehouse"
@@ -63,6 +67,7 @@ def fetch_feed(feed_name):
 
 def save_feed(spark, feed_name, records_key):
     payload = fetch_feed(feed_name)
+    validate_payload(payload, feed_name, records_key)
     records = payload["data"][records_key]
 
     if not records:
@@ -74,11 +79,31 @@ def save_feed(spark, feed_name, records_key):
         spark.sparkContext.parallelize([json.dumps(record) for record in records])
     )
 
-    df = (
-        df
-        .withColumn("last_updated", F.timestamp_seconds(F.lit(payload["last_updated"])))
-        .coalesce(1)
-    )
+    df = df.withColumn("last_updated", F.timestamp_seconds(F.lit(payload["last_updated"])))
+
+    valid, rejected = split_by_rules(df, feed_name)
+    rejected_count = rejected.count()
+
+    if rejected_count:
+        (
+            rejected
+            .withColumn("rejected_at", F.current_timestamp())
+            .coalesce(1)
+            .write
+            .format("delta")
+            .mode("append")
+            .option("mergeSchema", "true")
+            .save(f"{QUARANTINE_PATH}/{feed_name}")
+        )
+
+    rejected_ratio = rejected_count / len(records)
+    if rejected_ratio > MAX_REJECTED_RATIO:
+        raise ValueError(
+            f"{feed_name}: {rejected_count}/{len(records)} records rejected "
+            f"({rejected_ratio:.1%} > {MAX_REJECTED_RATIO:.1%}), bronze not updated"
+        )
+
+    df = valid.coalesce(1)
 
     if feed_name in STATIC_FEEDS:
         writer = (
@@ -99,7 +124,9 @@ def save_feed(spark, feed_name, records_key):
             .partitionBy("year", "month")
         )
 
-    writer.save(f"{BRONZE_PATH}/{feed_name}")
+    path = f"{BRONZE_PATH}/{feed_name}"
+    writer.save(path)
+    ensure_constraints(spark, path, feed_name)
 
     # Spark only sees the Delta write, so the API -> bronze step is reported explicitly.
     emit_run_event(
@@ -109,7 +136,7 @@ def save_feed(spark, feed_name, records_key):
         outputs=[bronze_dataset(feed_name)],
     )
 
-    print(f"{feed_name}: saved {len(records)} records")
+    print(f"{feed_name}: saved {len(records) - rejected_count} records, quarantined {rejected_count}")
 
 
 def extract_and_save():

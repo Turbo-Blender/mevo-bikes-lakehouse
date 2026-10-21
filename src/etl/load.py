@@ -7,7 +7,7 @@ from pathlib import Path
 import requests
 from pyspark.sql import SparkSession
 
-from lineage import clickhouse_dataset, emit_run_event, gold_dataset
+from common.lineage import clickhouse_dataset, emit_run_event, gold_dataset
 
 
 MINIO_PASSWORD = os.getenv("MINIO_ROOT_PASSWORD", "minio1234")
@@ -22,7 +22,7 @@ CLICKHOUSE_DB = os.getenv("CLICKHOUSE_DB", "warehouse")
 
 CLICKHOUSE_URL = f"http://{CLICKHOUSE_HOST}:{CLICKHOUSE_PORT}/"
 
-GOLD_PATH = "s3a://lakehouse/gold/mevo"
+GOLD_PATH = os.getenv("GOLD_PATH", "s3a://lakehouse/gold/mevo")
 DDL_FILE = Path(__file__).resolve().parents[1] / "SQL" / "clickhouse" / "00_create_tables.sql"
 
 GOLD_TABLES = [
@@ -33,7 +33,7 @@ GOLD_TABLES = [
     "station_hourly_occupancy",
 ]
 
-BATCH_SIZE = 50_000
+BATCH_SIZE = int(os.getenv("CLICKHOUSE_BATCH_SIZE", "50000"))
 
 
 def create_spark():

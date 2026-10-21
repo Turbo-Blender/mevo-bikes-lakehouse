@@ -3,15 +3,15 @@ from pathlib import Path
 
 from pyspark.sql import SparkSession
 
-from lineage import with_lineage
+from common.lineage import with_lineage
 
 
 MINIO_PASSWORD = os.getenv("MINIO_ROOT_PASSWORD", "minio1234")
 MINIO_USER = os.getenv("MINIO_ROOT_USER", "minio12345")
 MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT_S3", "http://minio:9000")
 
-SILVER_PATH = "s3a://lakehouse/silver/mevo"
-GOLD_PATH = "s3a://lakehouse/gold/mevo"
+SILVER_PATH = os.getenv("SILVER_PATH", "s3a://lakehouse/silver/mevo")
+GOLD_PATH = os.getenv("GOLD_PATH", "s3a://lakehouse/gold/mevo")
 SQL_DIR = Path(__file__).resolve().parents[1] / "SQL" / "gold"
 
 SILVER_TABLES = [

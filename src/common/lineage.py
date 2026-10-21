@@ -18,11 +18,11 @@ PARENT_JOB_NAMESPACE = os.getenv("OPENLINEAGE_PARENT_JOB_NAMESPACE")
 PARENT_JOB_NAME = os.getenv("OPENLINEAGE_PARENT_JOB_NAME")
 PARENT_RUN_ID = os.getenv("OPENLINEAGE_PARENT_RUN_ID")
 
-PRODUCER = "https://github.com/Turbo-Blender/mevo-bikes-lakehouse"
+PRODUCER = os.getenv("OPENLINEAGE_PRODUCER", "https://github.com/Turbo-Blender/mevo-bikes-lakehouse")
 RUN_EVENT_SCHEMA = "https://openlineage.io/spec/2-0-2/OpenLineage.json#/$defs/RunEvent"
 PARENT_FACET_SCHEMA = "https://openlineage.io/spec/facets/1-0-1/ParentRunFacet.json#/$defs/ParentRunFacet"
 
-LAKEHOUSE_NAMESPACE = "s3://lakehouse"
+LAKEHOUSE_NAMESPACE = os.getenv("LAKEHOUSE_NAMESPACE", "s3://lakehouse")
 
 
 def has_parent():

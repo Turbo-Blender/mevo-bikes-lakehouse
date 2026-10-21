@@ -58,6 +58,7 @@ services:
       CLICKHOUSE_PORT: 8123
       OPENLINEAGE_URL: http://marquez-api:5000
       OPENLINEAGE_NAMESPACE: mevo
+      PYTHONPATH: /app/src
     volumes:
       - ./src:/app/src
       - ./data:/app/data
