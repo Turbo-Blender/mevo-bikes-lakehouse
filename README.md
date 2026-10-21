@@ -8,6 +8,18 @@ Projekt co 30 minut pobiera dane o stacjach i rowerach z publicznego API GBFS sy
 
 [English version ↓](#english-version)
 
+## Interfejsy webowe
+
+Po uruchomieniu `docker compose up -d --build` dostępne są:
+
+| Interfejs | Adres | Logowanie |
+| --- | --- | --- |
+| **Airflow** (DAG-i, logi zadań) | http://localhost:8080 | `admin` / `admin` |
+| **MinIO Console** (bucket `lakehouse`) | http://localhost:9001 | `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` z `.env` |
+| **Marquez** (data lineage) | http://localhost:3000 | bez logowania |
+| **ClickHouse Play** (zapytania SQL do hurtowni) | http://localhost:8123/play | `CLICKHOUSE_USER` / `CLICKHOUSE_PASSWORD` z `.env` |
+| **Flower** (monitoring workerów Celery, opcjonalny) | http://localhost:5555 | uruchamiany przez `docker compose --profile flower up -d` |
+
 ## Spis treści
 
 - [Funkcje](#funkcje)
@@ -20,6 +32,7 @@ Projekt co 30 minut pobiera dane o stacjach i rowerach z publicznego API GBFS sy
 - [Struktura projektu](#struktura-projektu)
 - [Szybki start](#szybki-start)
 - [Walidacja pipeline'u](#walidacja-pipelineu)
+- [Data lineage](#data-lineage)
 - [Decyzje projektowe](#decyzje-projektowe)
 - [Autor i kontakt](#autor-i-kontakt)
 
@@ -34,6 +47,7 @@ Projekt co 30 minut pobiera dane o stacjach i rowerach z publicznego API GBFS sy
 - **Star schema w Gold** - wymiary stacji, typów rowerów i daty oraz fakt stanu stacji
 - **Agregaty analityczne** - godzinowe obłożenie stacji
 - **Hurtownia ClickHouse** - Gold ładowany do tabel `MergeTree` jako warstwa serwowania danych
+- **Data lineage** - OpenLineage i Marquez: graf przepływu danych od API, przez Bronze, Silver i Gold, do ClickHouse
 - **Eksploracja danych** - notebook Jupyter z EDA wszystkich feedów GBFS
 - **Trwałe wolumeny** - osobne wolumeny dla MinIO, ClickHouse i metadanych Airflow
 
@@ -64,6 +78,7 @@ flowchart LR
 | **MinIO** | Lokalny storage zgodny z S3 dla warstw Bronze, Silver i Gold |
 | **ClickHouse** | Hurtownia danych: szybka warstwa serwowania Gold |
 | **Redis** | Broker komunikatów dla CeleryExecutor |
+| **Marquez + OpenLineage** | Data lineage: zbiera zdarzenia z Airflow i Sparka i pokazuje graf zależności |
 | **Jupyter** | Eksploracyjna analiza danych |
 
 Lakehouse jest źródłem prawdy: cała logika transformacji siedzi w Sparku, a ClickHouse tylko udostępnia gotowy Gold do szybkich zapytań. Hurtownię można w każdej chwili odbudować z bucketa.
@@ -85,7 +100,8 @@ Oczyszczone, otypowane i znormalizowane dane.
 
 - `station_status` - pełna historia snapshotów (klucz `station_id` + `last_updated`), spłaszczone `vehicle_types_available` do `bikes_available` i `ebikes_available`, flaga `has_negative_counts`.
 - `free_bike_status` - historia zmian stanu rowerów (klucz `bike_id` + `last_reported`), flaga `has_invalid_coordinates`, usunięte `rental_uris`.
-- `station_information`, `vehicle_types`, `system_pricing_plans` - wymiary nadpisywane przy każdym uruchomieniu.
+- `station_information` - wymiar stacji jako **SCD Type 2**: jeden wiersz na wersję stacji, z kolumnami `valid_from`, `valid_to`, `is_current` i kluczem zastępczym `station_key`. Zmiany wykrywane są hashem atrybutów (`name`, `address`, `lat`, `lon`, `capacity`, `station_area` itd.), a jeden `MERGE` zamyka starą wersję i otwiera nową. Stacja, która zniknęła z feedu, dostaje tylko zamkniętą wersję.
+- `vehicle_types`, `system_pricing_plans` - wymiary nadpisywane przy każdym uruchomieniu.
 
 Tabele zdarzeń są aktualizowane przyrostowo: filtr po `last_updated` ogranicza odczyt z Bronze, a `MERGE ... WHEN NOT MATCHED THEN INSERT` pomija rekordy z kluczem, który już istnieje.
 
@@ -103,13 +119,13 @@ Kopia tabel Gold w silniku `MergeTree`, z partycjami miesięcznymi dla faktu i a
 
 | Tabela | Opis |
 | --- | --- |
-| `dim_station` | stacje: nazwa, adres, współrzędne, `capacity`, flaga stacji wirtualnej |
+| `dim_station` | stacje z historią wersji (SCD2): nazwa, adres, współrzędne, `capacity`, `valid_from`, `valid_to`, `is_current` |
 | `dim_vehicle_type` | typy rowerów połączone z cennikiem (`bike`, `ebike`) |
 | `dim_date` | kalendarz: rok, kwartał, miesiąc, dzień tygodnia, `is_weekend` |
 
 ### Fakt
 
-`fact_station_status` - ziarno: jedna stacja w jednym snapshocie. Zawiera liczbę rowerów (zwykłych i elektrycznych), wolne doki, `occupancy_ratio`, flagi `is_empty` i `is_full` oraz status stacji. `date_key` i `hour` liczone są w strefie `Europe/Warsaw`, a pełny czas zapisany także w UTC. Snapshoty z ujemnymi licznikami są odrzucane.
+`fact_station_status` - ziarno: jedna stacja w jednym snapshocie. Zawiera liczbę rowerów (zwykłych i elektrycznych), wolne doki, `occupancy_ratio`, flagi `is_empty` i `is_full` oraz status stacji. `date_key` i `hour` liczone są w strefie `Europe/Warsaw`, a pełny czas zapisany także w UTC. Snapshoty z ujemnymi licznikami są odrzucane. Fakt łączy się z wersją stacji obowiązującą w momencie snapshotu (`station_key`), więc np. `occupancy_ratio` używa ówczesnej wartości `capacity`.
 
 ### Agregat
 
@@ -120,12 +136,11 @@ Kopia tabel Gold w silniku `MergeTree`, z partycjami miesięcznymi dla faktu i a
 DAG `mevo_lakehouse` działa co 30 minut (`max_active_runs=1`, 3 ponowienia zadań co 2 minuty):
 
 ```
-ensure_bucket → extract_bronze → transform_silver → build_gold → load_clickhouse
+extract_bronze → transform_silver → build_gold → load_clickhouse
 ```
 
 | Zadanie | Działanie |
 | --- | --- |
-| `ensure_bucket` | tworzy bucket `lakehouse` w MinIO, jeśli go nie ma |
 | `extract_bronze` | `extract.py`: API → Bronze |
 | `transform_silver` | `transform.py`: Bronze → Silver |
 | `build_gold` | `gold.py`: Silver → Gold |
@@ -176,7 +191,8 @@ mevo-bikes-lakehouse/
 │   │   ├── extract.py           # API -> Bronze
 │   │   ├── transform.py         # Bronze -> Silver
 │   │   ├── gold.py              # Silver -> Gold
-│   │   └── load.py              # Gold -> ClickHouse
+│   │   ├── load.py              # Gold -> ClickHouse
+│   │   └── lineage.py           # wspólne funkcje OpenLineage
 │   └── SQL/
 │       ├── gold/
 │       │   ├── dimensions/      # dim_station, dim_vehicle_type, dim_date
@@ -226,6 +242,8 @@ W Airflow włącz DAG `mevo_lakehouse` (jest domyślnie wstrzymany). Od tej chwi
 | MinIO Console | http://localhost:9001 |
 | ClickHouse HTTP | http://localhost:8123 |
 | ClickHouse native | `localhost:9002` |
+| Marquez (lineage UI) | http://localhost:3000 |
+| Marquez API | http://localhost:5000 |
 
 ## Walidacja pipeline'u
 
@@ -245,13 +263,30 @@ SELECT
     s.station_name,
     round(avg(h.empty_ratio), 3) AS empty_ratio
 FROM station_hourly_occupancy AS h
-INNER JOIN dim_station AS s ON h.station_id = s.station_id
+INNER JOIN dim_station AS s ON h.station_id = s.station_id AND s.is_current
 GROUP BY s.station_name
 ORDER BY empty_ratio DESC
 LIMIT 10
 ```
 
 Dodatkowo: statusy zadań w Airflow, obiekty w MinIO (`bronze`, `silver`, `gold`) oraz historia wersji tabel Delta (`DESCRIBE HISTORY`).
+
+## Data lineage
+
+Pochodzenie danych śledzi standard **OpenLineage**, a zdarzenia zbiera **Marquez** (interfejs na http://localhost:3000, namespace `mevo`).
+
+Źródła zdarzeń:
+
+| Źródło | Co raportuje |
+| --- | --- |
+| **Airflow** (provider `apache-airflow-providers-openlineage`) | start, sukces i błąd każdego zadania DAG-a |
+| **Spark** (listener `openlineage-spark`) | zbiory wejściowe i wyjściowe każdego zadania, np. `gold.py` czyta `silver/station_status` i zapisuje `gold/fact_station_status` |
+| **`extract.py`** | krok API → Bronze (`fetch_<feed>`), którego Spark sam nie widzi |
+| **`load.py`** | krok Gold → ClickHouse (`load_clickhouse.<tabela>`), bo zapis idzie przez HTTP, a nie przez Sparka |
+
+Zadania Spark startują przez `docker exec`, więc DAG przekazuje do kontenera identyfikatory zadania Airflow (zmienne `OPENLINEAGE_PARENT_*` wypełniane makrami providera). Dzięki temu uruchomienie Sparka pojawia się w Marquez jako dziecko zadania Airflow, a nie jako osobny, niepołączony graf.
+
+Gdy zmienna `OPENLINEAGE_URL` nie jest ustawiona, skrypty działają bez lineage. Błąd wysyłki zdarzenia nigdy nie przerywa pipeline'u.
 
 ## Decyzje projektowe
 
@@ -286,6 +321,18 @@ Mevo Bikes Lakehouse to praktyczny projekt data engineeringowy. Pokazuje komplet
 
 Every 30 minutes the pipeline pulls station and bike data from Mevo's public GBFS API, stores it in a data lake (MinIO) as Delta tables using the medallion architecture (Bronze → Silver → Gold), and loads the Gold layer into a ClickHouse data warehouse. Everything is orchestrated by Apache Airflow and runs locally with Docker Compose.
 
+## Web interfaces
+
+After `docker compose up -d --build`:
+
+| Interface | URL | Login |
+| --- | --- | --- |
+| **Airflow** (DAGs, task logs) | http://localhost:8080 | `admin` / `admin` |
+| **MinIO Console** (`lakehouse` bucket) | http://localhost:9001 | `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` from `.env` |
+| **Marquez** (data lineage) | http://localhost:3000 | none |
+| **ClickHouse Play** (SQL on the warehouse) | http://localhost:8123/play | `CLICKHOUSE_USER` / `CLICKHOUSE_PASSWORD` from `.env` |
+| **Flower** (Celery worker monitoring, optional) | http://localhost:5555 | started with `docker compose --profile flower up -d` |
+
 ## Implemented features
 
 - **Containerized environment** - the whole stack runs through Docker Compose
@@ -297,6 +344,7 @@ Every 30 minutes the pipeline pulls station and bike data from Mevo's public GBF
 - **Gold star schema** - station, vehicle type, and date dimensions plus a station status fact
 - **Analytical aggregate** - hourly station occupancy
 - **ClickHouse warehouse** - Gold loaded into `MergeTree` tables as the serving layer
+- **Data lineage** - OpenLineage and Marquez: a dependency graph from the API through Bronze, Silver, and Gold to ClickHouse
 - **Exploratory analysis** - Jupyter notebook covering all GBFS feeds
 
 ## Architecture
@@ -324,7 +372,7 @@ The lakehouse is the source of truth: all transformation logic lives in Spark, a
 
 | Table | Type | Description |
 | --- | --- | --- |
-| `dim_station` | dimension | stations: name, address, coordinates, capacity |
+| `dim_station` | dimension (SCD2) | station versions: name, address, coordinates, capacity, `valid_from`, `valid_to`, `is_current` |
 | `dim_vehicle_type` | dimension | bike types joined with pricing plans |
 | `dim_date` | dimension | calendar with `is_weekend` |
 | `fact_station_status` | fact | one station in one snapshot: bikes, e-bikes, free docks, `occupancy_ratio`, `is_empty`, `is_full` |
@@ -337,7 +385,7 @@ The lakehouse is the source of truth: all transformation logic lives in Spark, a
 `mevo_lakehouse` runs every 30 minutes (`max_active_runs=1`, 3 task retries):
 
 ```
-ensure_bucket -> extract_bronze -> transform_silver -> build_gold -> load_clickhouse
+extract_bronze -> transform_silver -> build_gold -> load_clickhouse
 ```
 
 Spark jobs are started via `docker exec ... spark-submit` in the `mevo-bikes-spark` container.
@@ -356,6 +404,10 @@ Then enable the `mevo_lakehouse` DAG in Airflow (http://localhost:8080). It is p
 | Airflow | http://localhost:8080 |
 | MinIO Console | http://localhost:9001 |
 | ClickHouse HTTP | http://localhost:8123 |
+
+## Data lineage
+
+Data provenance is tracked with **OpenLineage** and collected by **Marquez** (UI at http://localhost:3000, namespace `mevo`). Events come from Airflow (task runs), the Spark listener (input and output datasets of every job), and two explicit events for steps Spark cannot see: API → Bronze in `extract.py` and Gold → ClickHouse in `load.py`. Because Spark jobs start through `docker exec`, the DAG passes the Airflow task identifiers into the container, so each Spark run is linked to its Airflow task in the graph. Without `OPENLINEAGE_URL` the jobs run without lineage, and a failed event never breaks the pipeline.
 
 ## Design decisions
 

@@ -4,9 +4,7 @@ from airflow import DAG
 from airflow.providers.standard.operators.bash import BashOperator
 
 SPARK_CONTAINER = "mevo-bikes-spark"
-MINIO_CONTAINER = "minio"
 SPARK_SUBMIT = "/opt/spark/bin/spark-submit"
-BUCKET = "lakehouse"
 
 default_args = {
     "owner": "TurboBlender",
@@ -16,7 +14,15 @@ default_args = {
 
 
 def spark_job(script):
-    return f"docker exec {SPARK_CONTAINER} {SPARK_SUBMIT} /app/src/etl/{script}"
+    # The OpenLineage macros pass this Airflow task as the parent of the Spark run,
+    # so the lineage graph links each Spark job to its task.
+    return (
+        "docker exec "
+        "-e OPENLINEAGE_PARENT_JOB_NAMESPACE='{{ macros.OpenLineageProviderPlugin.lineage_job_namespace() }}' "
+        "-e OPENLINEAGE_PARENT_JOB_NAME='{{ macros.OpenLineageProviderPlugin.lineage_job_name(task_instance) }}' "
+        "-e OPENLINEAGE_PARENT_RUN_ID='{{ macros.OpenLineageProviderPlugin.lineage_run_id(task_instance) }}' "
+        f"{SPARK_CONTAINER} {SPARK_SUBMIT} /app/src/etl/{script}"
+    )
 
 
 with DAG(
@@ -29,15 +35,6 @@ with DAG(
     max_active_runs=1,
     tags=["mevo", "lakehouse", "clickhouse"],
 ) as dag:
-
-    ensure_bucket = BashOperator(
-        task_id="ensure_bucket",
-        bash_command=(
-            f"docker exec {MINIO_CONTAINER} sh -c "
-            "'mc alias set local http://localhost:9000 \"$MINIO_ROOT_USER\" \"$MINIO_ROOT_PASSWORD\" "
-            f"&& mc mb --ignore-existing local/{BUCKET}'"
-        ),
-    )
 
     # API -> bronze (Delta in MinIO)
     extract = BashOperator(
@@ -63,4 +60,4 @@ with DAG(
         bash_command=spark_job("load.py"),
     )
 
-    ensure_bucket >> extract >> transform >> gold >> load
+    extract >> transform >> gold >> load

@@ -25,6 +25,11 @@ RUN curl -L \
     -o /opt/spark/jars/delta-storage-3.3.2.jar \
     https://repo1.maven.org/maven2/io/delta/delta-storage/3.3.2/delta-storage-3.3.2.jar
 
+# OpenLineage Spark listener (data lineage reported to Marquez)
+RUN curl -L \
+    -o /opt/spark/jars/openlineage-spark_2.12-1.54.0.jar \
+    https://repo1.maven.org/maven2/io/openlineage/openlineage-spark_2.12/1.54.0/openlineage-spark_2.12-1.54.0.jar
+
 WORKDIR /opt/spark-apps
 
 USER spark

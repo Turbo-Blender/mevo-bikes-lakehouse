@@ -4,6 +4,8 @@ from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.utils import AnalysisException
 
+from lineage import with_lineage
+
 
 MINIO_PASSWORD = os.getenv("MINIO_ROOT_PASSWORD", "minio1234")
 MINIO_USER = os.getenv("MINIO_ROOT_USER", "minio12345")
@@ -22,7 +24,7 @@ SERVICE_AREA = {
 
 
 def create_spark():
-    return (
+    builder = (
         SparkSession.builder
         .appName("silver-transformation")
         .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
@@ -33,8 +35,8 @@ def create_spark():
         .config("spark.hadoop.fs.s3a.secret.key", MINIO_PASSWORD)
         .config("spark.hadoop.fs.s3a.path.style.access", "true")
         .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
-        .getOrCreate()
     )
+    return with_lineage(builder).getOrCreate()
 
 
 def read_delta(spark, path):
@@ -103,8 +105,40 @@ def transform_station_status(df):
     )
 
 
+# Attributes whose changes create a new version of a station (SCD2).
+STATION_TRACKED_COLUMNS = [
+    "name",
+    "address",
+    "cross_street",
+    "lat",
+    "lon",
+    "capacity",
+    "is_virtual_station",
+    "station_area",
+]
+
+SILVER_STATION_COLUMNS = [
+    "station_key",
+    "station_id",
+    *STATION_TRACKED_COLUMNS,
+    "attr_hash",
+    "valid_from",
+    "valid_to",
+    "is_current",
+]
+
+# The first load has no earlier snapshots, so its versions are valid "from the beginning"
+# and every historical station_status snapshot can be joined to a station version.
+SCD2_INITIAL_VALID_FROM = "2000-01-01 00:00:00"
+
+
 def transform_station_information(df):
-    return df.drop("rental_uris")
+    return (
+        df
+        .select("station_id", *STATION_TRACKED_COLUMNS, "last_updated")
+        .dropDuplicates(["station_id"])
+        .withColumn("attr_hash", F.sha2(F.to_json(F.struct(*STATION_TRACKED_COLUMNS)), 256))
+    )
 
 
 def overwrite_silver(df, table):
@@ -164,6 +198,98 @@ def build_station_status(spark):
     print(f"{table}: silver updated")
 
 
+def build_station_information(spark):
+    """Station dimension as SCD Type 2: one row per station version."""
+    table = "station_information"
+    path = f"{SILVER_PATH}/{table}"
+
+    source = transform_station_information(
+        spark.read.format("delta").load(f"{BRONZE_PATH}/{table}")
+    )
+    snapshot_at = source.agg(F.max("last_updated")).first()[0]
+
+    # An empty feed would otherwise close every current station version.
+    if snapshot_at is None:
+        raise ValueError(f"{table}: bronze snapshot is empty, refusing to close all versions")
+
+    silver_df = read_delta(spark, path)
+
+    if silver_df is None:
+        (
+            source
+            .withColumn("valid_from", F.lit(SCD2_INITIAL_VALID_FROM).cast("timestamp"))
+            .withColumn("valid_to", F.lit(None).cast("timestamp"))
+            .withColumn("is_current", F.lit(True))
+            .withColumn("station_key", F.xxhash64("station_id", "valid_from"))
+            .select(*SILVER_STATION_COLUMNS)
+            .coalesce(1)
+            .write
+            .format("delta")
+            .save(path)
+        )
+        print(f"{table}: silver created")
+        return
+
+    current = silver_df.filter("is_current").select("station_id", "attr_hash")
+
+    staged_columns = ["merge_key", "station_id", *STATION_TRACKED_COLUMNS, "attr_hash", "last_updated"]
+
+    compared = source.join(current.withColumnRenamed("attr_hash", "current_hash"), "station_id", "left")
+    changed = compared.filter(
+        F.col("current_hash").isNull() | (F.col("current_hash") != F.col("attr_hash"))
+    )
+
+    # New and changed stations: merge_key is NULL, so they never match and get inserted.
+    new_versions = (
+        changed
+        .withColumn("merge_key", F.lit(None).cast("string"))
+        .select(*staged_columns)
+    )
+
+    # Changed stations: match the current version and close it.
+    closed_changed = (
+        changed
+        .filter(F.col("current_hash").isNotNull())
+        .withColumn("merge_key", F.col("station_id"))
+        .select(*staged_columns)
+    )
+
+    # Stations missing from the feed: close their current version, no new one is opened.
+    removed = (
+        silver_df
+        .filter("is_current")
+        .join(source.select("station_id"), "station_id", "left_anti")
+        .withColumn("merge_key", F.col("station_id"))
+        .withColumn("last_updated", F.lit(snapshot_at))
+        .select(*staged_columns)
+    )
+
+    new_versions.unionByName(closed_changed).unionByName(removed).createOrReplaceTempView("staged")
+
+    insert_columns = ", ".join(SILVER_STATION_COLUMNS)
+    tracked = ", ".join(f"source.{column}" for column in STATION_TRACKED_COLUMNS)
+
+    spark.sql(f"""
+        MERGE INTO delta.`{path}` AS target
+        USING staged AS source
+        ON target.station_id = source.merge_key AND target.is_current = true
+        WHEN MATCHED THEN UPDATE SET
+            target.is_current = false,
+            target.valid_to = source.last_updated
+        WHEN NOT MATCHED AND source.merge_key IS NULL THEN INSERT ({insert_columns})
+        VALUES (
+            xxhash64(source.station_id, source.last_updated),
+            source.station_id,
+            {tracked},
+            source.attr_hash,
+            source.last_updated,
+            NULL,
+            true
+        )
+    """)
+    print(f"{table}: silver SCD2 updated")
+
+
 def build_static_table(spark, table, transform=None):
     df = spark.read.format("delta").load(f"{BRONZE_PATH}/{table}")
 
@@ -180,7 +306,7 @@ if __name__ == "__main__":
     try:
         build_static_table(spark, "vehicle_types")
         build_static_table(spark, "system_pricing_plans")
-        build_static_table(spark, "station_information", transform_station_information)
+        build_station_information(spark)
         build_station_status(spark)
         build_free_bike_status(spark)
 

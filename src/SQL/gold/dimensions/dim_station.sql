@@ -1,4 +1,5 @@
 SELECT
+    station_key,
     station_id,
     name AS station_name,
     address,
@@ -7,5 +8,7 @@ SELECT
     lon,
     capacity,
     is_virtual_station,
-    last_updated AS source_updated_at
+    valid_from,
+    valid_to,
+    is_current
 FROM silver_station_information

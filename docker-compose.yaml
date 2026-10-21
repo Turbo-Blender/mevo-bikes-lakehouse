@@ -22,6 +22,8 @@ x-airflow-common:
     AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW__API_AUTH__JWT_SECRET:-airflow_jwt_secret}
     AIRFLOW__API_AUTH__JWT_ISSUER: ${AIRFLOW__API_AUTH__JWT_ISSUER:-airflow}
     AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+    AIRFLOW__OPENLINEAGE__TRANSPORT: '{"type": "http", "url": "http://marquez-api:5000", "endpoint": "api/v1/lineage"}'
+    AIRFLOW__OPENLINEAGE__NAMESPACE: mevo
     _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-}
     AIRFLOW_CONFIG: '/opt/airflow/config/airflow.cfg'
   volumes:
@@ -54,6 +56,8 @@ services:
       CLICKHOUSE_DB: ${CLICKHOUSE_DB:-warehouse}
       CLICKHOUSE_HOST: clickhouse
       CLICKHOUSE_PORT: 8123
+      OPENLINEAGE_URL: http://marquez-api:5000
+      OPENLINEAGE_NAMESPACE: mevo
     volumes:
       - ./src:/app/src
       - ./data:/app/data
@@ -63,7 +67,8 @@ services:
     command: tail -f /dev/null
 
   minio:
-    image: minio/minio:latest
+    # minio/minio is no longer published on Docker Hub or Quay, so the Chainguard build is used.
+    image: cgr.dev/chainguard/minio:latest
     container_name: minio
     ports:
       - "9000:9000"
@@ -74,6 +79,66 @@ services:
     volumes:
       - minio_data:/data
     command: server /data --console-address ":9001"
+
+  # Data lineage (OpenLineage backend): metadata DB, API and web UI
+  marquez-db:
+    image: postgres:16
+    container_name: marquez-db
+    environment:
+      POSTGRES_USER: marquez
+      POSTGRES_PASSWORD: marquez
+      POSTGRES_DB: marquez
+    volumes:
+      - marquez_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U marquez -d marquez"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: always
+
+  marquez-api:
+    image: marquezproject/marquez:latest
+    container_name: marquez-api
+    environment:
+      MARQUEZ_PORT: 5000
+      MARQUEZ_ADMIN_PORT: 5001
+      POSTGRES_HOST: marquez-db
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: marquez
+      POSTGRES_USER: marquez
+      POSTGRES_PASSWORD: marquez
+    ports:
+      - "5000:5000"
+    depends_on:
+      marquez-db:
+        condition: service_healthy
+    restart: always
+
+  marquez-web:
+    image: marquezproject/marquez-web:latest
+    container_name: marquez-web
+    environment:
+      MARQUEZ_HOST: marquez-api
+      MARQUEZ_PORT: 5000
+      WEB_PORT: 3000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - marquez-api
+    restart: always
+
+  # One-shot job: creates the lakehouse bucket (retries until MinIO accepts connections).
+  minio-init:
+    image: cgr.dev/chainguard/minio-client:latest
+    container_name: minio-init
+    depends_on:
+      - minio
+    environment:
+      MC_HOST_local: http://${MINIO_ROOT_USER}:${MINIO_ROOT_PASSWORD}@minio:9000
+    entrypoint: ["/usr/bin/mc"]
+    command: ["mb", "--ignore-existing", "local/lakehouse"]
+    restart: on-failure
 
   # Data warehouse (serving layer for the gold tables)
   clickhouse:
@@ -355,3 +420,4 @@ volumes:
   minio_data:
   clickhouse_data:
   airflow_postgres_data:
+  marquez_db_data:

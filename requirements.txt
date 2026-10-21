@@ -5,4 +5,3 @@ pyarrow
 fastparquet
 pyspark==3.5.6
 requests
-clickhouse-connect

@@ -1,5 +1,6 @@
 CREATE TABLE IF NOT EXISTS dim_station
 (
+    station_key Int64,
     station_id String,
     station_name Nullable(String),
     address Nullable(String),
@@ -8,10 +9,12 @@ CREATE TABLE IF NOT EXISTS dim_station
     lon Nullable(Float64),
     capacity Nullable(Int64),
     is_virtual_station Nullable(Bool),
-    source_updated_at DateTime
+    valid_from DateTime,
+    valid_to Nullable(DateTime),
+    is_current Bool
 )
 ENGINE = MergeTree
-ORDER BY station_id;
+ORDER BY (station_id, valid_from);
 
 CREATE TABLE IF NOT EXISTS dim_vehicle_type
 (
@@ -47,6 +50,7 @@ ORDER BY date_key;
 
 CREATE TABLE IF NOT EXISTS fact_station_status
 (
+    station_key Nullable(Int64),
     station_id String,
     date_key Int32,
     hour Int32,

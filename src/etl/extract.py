@@ -7,6 +7,8 @@ from pyspark.sql import functions as F
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from lineage import api_dataset, bronze_dataset, emit_run_event, with_lineage
+
 
 MINIO_PASSWORD = os.getenv("MINIO_ROOT_PASSWORD", "minio1234")
 MINIO_USER = os.getenv("MINIO_ROOT_USER", "minio12345")
@@ -99,23 +101,31 @@ def save_feed(spark, feed_name, records_key):
 
     writer.save(f"{BRONZE_PATH}/{feed_name}")
 
+    # Spark only sees the Delta write, so the API -> bronze step is reported explicitly.
+    emit_run_event(
+        "COMPLETE",
+        job_name=f"fetch_{feed_name}",
+        inputs=[api_dataset(GBFS_BASE_URL, feed_name)],
+        outputs=[bronze_dataset(feed_name)],
+    )
+
     print(f"{feed_name}: saved {len(records)} records")
 
 
 def extract_and_save():
-    spark = (
-    SparkSession.builder
-    .appName("bronze-raw-ingestion")
-    .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-    .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
-    .config("spark.sql.session.timeZone", "UTC")
-    .config("spark.hadoop.fs.s3a.endpoint", MINIO_ENDPOINT)
-    .config("spark.hadoop.fs.s3a.access.key", MINIO_USER)
-    .config("spark.hadoop.fs.s3a.secret.key", MINIO_PASSWORD)
-    .config("spark.hadoop.fs.s3a.path.style.access", "true")
-    .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
-    .getOrCreate()
+    builder = (
+        SparkSession.builder
+        .appName("bronze-raw-ingestion")
+        .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
+        .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
+        .config("spark.sql.session.timeZone", "UTC")
+        .config("spark.hadoop.fs.s3a.endpoint", MINIO_ENDPOINT)
+        .config("spark.hadoop.fs.s3a.access.key", MINIO_USER)
+        .config("spark.hadoop.fs.s3a.secret.key", MINIO_PASSWORD)
+        .config("spark.hadoop.fs.s3a.path.style.access", "true")
+        .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
     )
+    spark = with_lineage(builder).getOrCreate()
     try:
         for feed_name, records_key in FEEDS.items():
             save_feed(spark, feed_name, records_key)

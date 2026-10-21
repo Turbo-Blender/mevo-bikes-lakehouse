@@ -3,6 +3,8 @@ from pathlib import Path
 
 from pyspark.sql import SparkSession
 
+from lineage import with_lineage
+
 
 MINIO_PASSWORD = os.getenv("MINIO_ROOT_PASSWORD", "minio1234")
 MINIO_USER = os.getenv("MINIO_ROOT_USER", "minio12345")
@@ -31,7 +33,7 @@ GOLD_TABLES = [
 
 
 def create_spark():
-    return (
+    builder = (
         SparkSession.builder
         .appName("gold-build")
         .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
@@ -42,8 +44,8 @@ def create_spark():
         .config("spark.hadoop.fs.s3a.secret.key", MINIO_PASSWORD)
         .config("spark.hadoop.fs.s3a.path.style.access", "true")
         .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
-        .getOrCreate()
     )
+    return with_lineage(builder).getOrCreate()
 
 
 def register_silver_views(spark):
