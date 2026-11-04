@@ -417,6 +417,25 @@ services:
       airflow-init:
         condition: service_completed_successfully
 
+  dashboard-api:
+    build:
+      context: ./webapp/backend
+      dockerfile: Dockerfile
+    container_name: mevo-dashboard-api
+    environment:
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: 8123
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB:-warehouse}
+      CORS_ALLOWED_ORIGINS: http://localhost:4200,http://localhost:8082
+    ports:
+      - "8081:8081"
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   minio_data:
   clickhouse_data:

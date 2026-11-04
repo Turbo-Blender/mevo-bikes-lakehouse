@@ -1,0 +1,15 @@
+server:
+  port: 8081
+
+spring:
+  application:
+    name: mevo-dashboard-api
+
+clickhouse:
+  url: jdbc:clickhouse://${CLICKHOUSE_HOST:localhost}:${CLICKHOUSE_PORT:8123}/${CLICKHOUSE_DB:warehouse}
+  username: ${CLICKHOUSE_USER:clickhouse}
+  password: ${CLICKHOUSE_PASSWORD:clickhouse}
+
+app:
+  cors:
+    allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:4200}

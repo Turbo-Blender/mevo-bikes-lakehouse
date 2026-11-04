@@ -1,0 +1,111 @@
+:host {
+  display: block;
+  min-height: 100vh;
+  padding: 1.25rem 1.5rem 1.5rem;
+  box-sizing: border-box;
+  background: #f3f4f6;
+  color: #111827;
+}
+
+.header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+h1 {
+  margin: 0 0 0.25rem;
+  font-size: 1.5rem;
+}
+
+.subtitle {
+  margin: 0;
+  color: #4b5563;
+  font-size: 0.95rem;
+}
+
+.refresh {
+  border: 1px solid #d1d5db;
+  background: #fff;
+  border-radius: 0.5rem;
+  padding: 0.5rem 0.85rem;
+  cursor: pointer;
+}
+
+.refresh:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.status {
+  margin: 0 0 1rem;
+}
+
+.status.error {
+  color: #b91c1c;
+}
+
+.stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.stats article {
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 0.75rem;
+  padding: 0.75rem 1rem;
+}
+
+.label {
+  display: block;
+  font-size: 0.8rem;
+  color: #6b7280;
+  margin-bottom: 0.25rem;
+}
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1.25rem;
+  margin-bottom: 0.75rem;
+  font-size: 0.85rem;
+  color: #374151;
+}
+
+.dot {
+  display: inline-block;
+  width: 0.75rem;
+  height: 0.75rem;
+  border-radius: 999px;
+  margin-right: 0.35rem;
+  vertical-align: middle;
+}
+
+.dot.green {
+  background: #22c55e;
+}
+
+.dot.amber {
+  background: #f59e0b;
+}
+
+.dot.red {
+  background: #ef4444;
+}
+
+.dot.indigo {
+  background: #6366f1;
+}
+
+.map {
+  height: min(70vh, 720px);
+  border-radius: 0.75rem;
+  border: 1px solid #e5e7eb;
+  overflow: hidden;
+  background: #dbeafe;
+}

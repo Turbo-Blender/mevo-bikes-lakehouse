@@ -1,0 +1,41 @@
+<header class="header">
+  <div>
+    <h1>Mevo — stan stacji</h1>
+    <p class="subtitle">Dane z ClickHouse (<code>fact_station_status</code> + <code>dim_station</code>)</p>
+  </div>
+  <button type="button" class="refresh" (click)="reload()" [disabled]="loading()">Odśwież</button>
+</header>
+
+@if (loading()) {
+  <p class="status">Ładowanie danych…</p>
+}
+
+@if (error(); as message) {
+  <p class="status error">{{ message }}</p>
+}
+
+@if (stats(); as s) {
+  <section class="stats">
+    <article>
+      <span class="label">Wiersze w fakcie</span>
+      <strong>{{ s.factRowCount }}</strong>
+    </article>
+    <article>
+      <span class="label">Stacje</span>
+      <strong>{{ s.stationCount }}</strong>
+    </article>
+    <article>
+      <span class="label">Ostatni snapshot (UTC)</span>
+      <strong>{{ s.latestSnapshotUtc | date: 'yyyy-MM-dd HH:mm:ss' }}</strong>
+    </article>
+  </section>
+}
+
+<section class="legend">
+  <span><i class="dot green"></i> dostępne rowery</span>
+  <span><i class="dot amber"></i> wysokie obłożenie</span>
+  <span><i class="dot red"></i> pusta stacja</span>
+  <span><i class="dot indigo"></i> pełna stacja</span>
+</section>
+
+<div #mapHost class="map" role="region" aria-label="Mapa stacji Mevo"></div>

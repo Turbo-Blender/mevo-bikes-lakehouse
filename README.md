@@ -18,6 +18,7 @@ Po uruchomieniu `docker compose up -d --build` dostępne są:
 | **MinIO Console** (bucket `lakehouse`) | http://localhost:9001 | `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` z `.env` |
 | **Marquez** (data lineage) | http://localhost:3000 | bez logowania |
 | **ClickHouse Play** (zapytania SQL do hurtowni) | http://localhost:8123/play | `CLICKHOUSE_USER` / `CLICKHOUSE_PASSWORD` z `.env` |
+| **Mevo Dashboard API** (REST dla webappki) | http://localhost:8081/api/stats | — |
 | **Flower** (monitoring workerów Celery, opcjonalny) | http://localhost:5555 | uruchamiany przez `docker compose --profile flower up -d` |
 
 ## Spis treści
@@ -493,6 +494,10 @@ mevo-bikes-lakehouse/
 │   └── Dockerfile.airflow       # Airflow + docker CLI
 ├── notebooks/
 │   └── eda.ipynb                # EDA feedów GBFS
+├── webapp/                      # Angular + Spring Boot dashboard
+│   ├── backend/                 # REST API -> ClickHouse
+│   ├── frontend/                # mapa stacji + KPI
+│   └── README.md
 ├── src/
 │   ├── etl/
 │   │   ├── extract.py           # API -> Bronze
@@ -520,6 +525,7 @@ mevo-bikes-lakehouse/
 
 - Docker Desktop z Docker Compose
 - ok. 8 GB wolnej pamięci RAM dla całego stacku
+- ok. 14 GB wolnej pamięci dyskowej na obrazy Docker
 
 ### 1. Skonfiguruj środowisko
 
